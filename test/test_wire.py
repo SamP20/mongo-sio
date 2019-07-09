@@ -57,11 +57,11 @@ def test_compressed_header_zlib(data, compressor):
         body_compressed
     )
 
-    request_id, response_to, op_code, parsed_data = parse_header(packed)
+    request_id, response_to, op_code, parsed_data, offset = parse_header(packed)
     assert request_id == 345
     assert response_to == 567
     assert op_code == OP_MSG
-    assert parsed_data == body
+    assert parsed_data[offset:] == body
 
 def test_parse_op_msg():
     header_doc = {

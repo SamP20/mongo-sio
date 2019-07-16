@@ -1,9 +1,10 @@
 import pytest
-import mongo_sio.wire
-from mongo_sio.wire import ReceiveBuffer, parse_header, parse_op_msg, OP_COMPRESSED, OP_MSG, COMPRESSOR_ZLIB, COMPRESSOR_NOOP
+import mongo_sio
+from mongo_sio import parse_header, parse_op_msg, parse_op_reply, OP_COMPRESSED, OP_MSG, COMPRESSOR_ZLIB, COMPRESSOR_NOOP, COMPRESSOR_SNAPPY
 import zlib
 import struct
 import bson
+
 
 samples = [
     bytes([8, 0, 0, 0, 1, 2, 3, 4]),
@@ -13,41 +14,21 @@ samples = [
 ]
 
 
-def test_exact_size_buffers():
-    rbuf = ReceiveBuffer()
-    for i, s in enumerate(samples):
-        rbuf.feed(s)
-        assert rbuf.complete_packets == samples[:i+1]
-
-
-@pytest.mark.parametrize("split",[2, 3, 4, 5])
-def test_split_buffer(split):
-    rbuf = ReceiveBuffer()
-    for i, s in enumerate(samples):
-        rbuf.feed(s[:split])
-        rbuf.feed(s[split:])
-        assert rbuf.complete_packets == samples[:i+1]
-
-
-def test_merged_buffers():
-    rbuf = ReceiveBuffer()
-    data = b"".join(samples)
-    rbuf.feed(data)
-    assert rbuf.complete_packets == samples
-
 @pytest.mark.parametrize("data",[range(256), 128])
-@pytest.mark.parametrize("compressor",[COMPRESSOR_ZLIB, COMPRESSOR_NOOP])
+@pytest.mark.parametrize("compressor", mongo_sio.SUPPORTED_COMPRESSORS)
 def test_compressed_header_zlib(data, compressor):
     body = bytes(data)
 
     if compressor == COMPRESSOR_ZLIB:
         body_compressed = zlib.compress(body)
+    elif compressor == COMPRESSOR_SNAPPY:
+        # pylint: disable=import-error
+        import snappy
+        body_compressed = snappy.compress(body)
     elif compressor == COMPRESSOR_NOOP:
         body_compressed = body
     
-    total_len = 4+4+4+4+4+8+len(body_compressed)
-    packed = struct.pack(f"<IIIIIIB{len(body_compressed)}s",
-        total_len,
+    packed = struct.pack(f"<IIIIIB{len(body_compressed)}s",
         345,
         567,
         OP_COMPRESSED,
@@ -85,3 +66,25 @@ def test_parse_op_msg():
     assert header_doc == out_header_doc
     assert {b"documents": [body0_doc]} == out_sections
     assert out_flagbits == 0x02
+
+
+def test_parse_op_reply():
+    document = {
+        "A": "b",
+        "B": 42,
+        "C": {"hello": False}
+    }
+
+    flags = 0x55aaff00
+    cursor_id = 0x7799aabb_ccddeeff
+    starting_from = 0x11223344
+    num_returned = 1
+    doc_bytes = bson.dumps(document)
+    data = struct.pack(f"<iqii{len(doc_bytes)}s", flags, cursor_id, starting_from, num_returned, doc_bytes)
+
+    out_flags, out_cursor_id, out_starting_from, out_docs = parse_op_reply(data)
+    assert out_flags == flags
+    assert out_cursor_id == cursor_id
+    assert out_starting_from == starting_from
+    assert len(out_docs) == 1
+    assert out_docs[0] == document
